@@ -3,8 +3,8 @@
 ## 📋 PROGRESO DEL PROYECTO
 
 - [x] **MÓDULO 1: ALARMA** (Buzzer + Botón) ✅ COMPLETADO
-- [ ] **MÓDULO 2: ILUMINACIÓN** (LDR + LED)
-- [ ] **MÓDULO 3: ACCESO** (OptoSwitch + Servomotor)
+- [x] **MÓDULO 2: ILUMINACIÓN** (LDR + LED)
+- [x] **MÓDULO 3: ACCESO** (OptoSwitch + Servomotor)
 - [ ] **MÓDULO 4: CLIMA** (LM35 + Motor Ventilador)
 - [ ] **INTEGRACIÓN FINAL** (Todo junto + WiFi + Estética)
 
