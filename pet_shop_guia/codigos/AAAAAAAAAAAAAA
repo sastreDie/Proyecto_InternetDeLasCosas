@@ -1,0 +1,224 @@
+#include <ESP32Servo.h>
+#include <WiFi.h>
+
+// ── WiFi ──
+const char* ssid     = "iPhone de Ulises";
+const char* password = "1234567890";
+WiFiServer server(80);
+
+// ── Config ──
+const int UMBRAL_LDR    = 100;
+const float UMBRAL_TEMP = 15.5;
+
+// ── Servo ──
+Servo servo;
+bool puerta_abierta = false;
+unsigned long puerta_tiempo_apertura = 0;
+
+// ── LED ──
+bool led_manual   = false;
+bool led_auto     = false;
+int  led_brillo   = 128;
+static int ultimo_brillo = -1;
+const int LED_PIN   = 26;
+const int LED_CANAL = 4;
+
+// ── Motor ──
+const int PIN_IN1  = 27;
+const int PIN_IN2  = 14;
+bool motor_on     = false;
+bool motor_manual = false;
+
+// ── Buzzer web ──
+bool buzzer_web = false;
+unsigned long buzzer_tiempo = 0;
+const unsigned long DURACION_BUZZER = 1000;
+
+String generarHTML(bool puerta_abierta, int ldr, bool led_on, bool led_auto_on, int brillo, float temp, bool motor, bool motor_man) {
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<meta http-equiv='refresh' content='2'>";
+  html += "<title>Sistema</title>";
+  html += "<style>body{font-family:Arial;text-align:center;background:#1a1a2e;padding:20px;color:white;}";
+  html += ".box{background:#16213e;max-width:400px;margin:auto;padding:30px;border-radius:15px;}";
+  html += "h1{color:#e94560;}";
+  html += ".card{background:#0f3460;border-radius:10px;padding:15px;margin:10px 0;}";
+  html += ".on{color:#4ecca3;} .off{color:#e94560;}";
+  html += "button{padding:15px 30px;font-size:16px;border:none;border-radius:10px;cursor:pointer;width:100%;margin:5px 0;}";
+  html += ".btn-red{background:#e94560;color:white;}";
+  html += ".btn-green{background:#4ecca3;color:#1a1a2e;}";
+  html += ".btn-yellow{background:#f5a623;color:#1a1a2e;}";
+  html += ".btn-blue{background:#4a9eff;color:white;}";
+  html += "input[type=range]{width:100%;margin:10px 0;}";
+  html += "</style></head><body><div class='box'>";
+  html += "<h1>🏠 Sistema</h1>";
+
+  // ── Card LED ──
+  html += "<div class='card'><b>💡 Luz</b><br>";
+  html += "LDR: " + String(ldr) + "<br>";
+  html += "Modo auto: <span class='" + String(led_auto_on ? "on" : "off") + "'>" + String(led_auto_on ? "ON" : "OFF") + "</span><br>";
+  html += "LED: <span class='" + String(led_on ? "on" : "off") + "'>" + String(led_on ? "ON" : "OFF") + "</span><br><br>";
+  html += "<button class='btn-yellow' onclick=\"fetch('/LED_ON')\">💡 " + String(led_manual ? "Apagar LED" : "Prender LED") + "</button>";
+  html += "Intensidad: <span id='val'>" + String(brillo) + "</span><br>";
+  html += "<input type='range' min='0' max='255' value='" + String(brillo) + "' ";
+  html += "oninput=\"document.getElementById('val').innerText=this.value\" ";
+  html += "onchange=\"fetch('/BRILLO?v='+this.value)\"></div>";
+
+  // ── Card Temperatura y Motor ──
+  html += "<div class='card'><b>🌡 Temperatura</b><br>";
+  html += "Temp: <b>" + String(temp, 1) + " °C</b><br>";
+  html += "Umbral: " + String(UMBRAL_TEMP, 1) + " °C<br>";
+  html += "Auto: <span class='" + String((temp > UMBRAL_TEMP) ? "on" : "off") + "'>" + String((temp > UMBRAL_TEMP) ? "activo" : "inactivo") + "</span><br>";
+  html += "Aire: <span class='" + String(motor ? "on" : "off") + "'>" + String(motor ? "ENCENDIDO" : "APAGADO") + "</span><br><br>";
+  html += "<button class='btn-blue' onclick=\"fetch('/MOTOR')\">💨 " + String(motor_man ? "Apagar aire (manual)" : "Prender aire (manual)") + "</button></div>";
+
+  // ── Card Puerta ──
+  html += "<div class='card'><b>🚪 Acceso</b><br>";
+  html += "Puerta: <span class='" + String(puerta_abierta ? "on" : "off") + "'>";
+  html += String(puerta_abierta ? "ABIERTA" : "CERRADA") + "</span></div>";
+
+  // ── Botones ──
+  html += "<button class='btn-red' onclick=\"fetch('/BUZZER')\">🔔 Timbre</button>";
+  html += "<button class='btn-green' onclick=\"fetch('/ABRIR')\">🚪 Abrir puerta</button>";
+
+  html += "</div></body></html>";
+  return html;
+}
+
+void setup() {
+  Serial.begin(115200);
+  analogReadResolution(12);
+
+  pinMode(13, INPUT);
+  pinMode(33, INPUT_PULLUP);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+
+  servo.attach(18, 1000, 2000);
+  servo.write(120);
+
+  ledcAttachChannel(LED_PIN, 5000, 8, LED_CANAL);
+  ledcWrite(LED_PIN, 0);
+
+  Serial.print("Conectando a WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi conectado!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+
+  server.begin();
+}
+
+void loop() {
+  unsigned long ahora = millis();
+
+  // ── Sensores ──
+  int ldr = analogRead(34);
+  float temperatura = analogRead(35) * (3.3 / 4095.0) * 100.0;
+
+  // ── Módulo 1: Timbre físico ──
+  bool presionado = digitalRead(13) == HIGH;
+  if (presionado) {
+    tone(2, 2500);
+  } else if (!buzzer_web) {
+    noTone(2);
+  }
+
+  // ── Buzzer web ──
+  if (buzzer_web) {
+    tone(2, 2500);
+    if (ahora - buzzer_tiempo >= DURACION_BUZZER) {
+      noTone(2);
+      buzzer_web = false;
+    }
+  }
+
+  // ── Módulo 2: LED ──
+  led_auto = (ldr < UMBRAL_LDR);
+  bool led_encendido = led_manual || led_auto;
+  int brillo_actual = led_encendido ? led_brillo : 0;
+  if (brillo_actual != ultimo_brillo) {
+    ledcWrite(LED_PIN, brillo_actual);
+    ultimo_brillo = brillo_actual;
+  }
+
+  // ── Módulo 3: Puerta ──
+  bool bloqueado = digitalRead(33) == LOW;
+  if (bloqueado && !puerta_abierta) {
+    Serial.println("Opto — Abriendo");
+    servo.write(40);
+    puerta_abierta = true;
+    puerta_tiempo_apertura = ahora;
+  }
+  if (puerta_abierta && (ahora - puerta_tiempo_apertura >= 3000)) {
+    Serial.println("Cerrando");
+    servo.write(120);
+    puerta_abierta = false;
+  }
+
+  // ── Módulo 4: Motor / Aire ──
+  bool motor_auto = (temperatura > UMBRAL_TEMP);
+  motor_on = motor_manual || motor_auto;
+
+  if (motor_on) {
+    digitalWrite(PIN_IN1, HIGH);
+    digitalWrite(PIN_IN2, LOW);
+  } else {
+    digitalWrite(PIN_IN1, LOW);
+    digitalWrite(PIN_IN2, LOW);
+  }
+
+  // ── Servidor web ──
+  WiFiClient client = server.accept();
+  if (client) {
+    String peticion = client.readStringUntil('\r');
+    Serial.println(peticion);
+
+    if (peticion.indexOf("/BUZZER") > -1) {
+      buzzer_web = true;
+      buzzer_tiempo = ahora;
+    }
+
+    if (peticion.indexOf("/LED_ON") > -1) {
+      led_manual = !led_manual;
+      Serial.println(led_manual ? "LED manual ON" : "LED manual OFF");
+    }
+
+    if (peticion.indexOf("/BRILLO") > -1) {
+      int idx = peticion.indexOf("?v=");
+      if (idx > -1) {
+        led_brillo = constrain(peticion.substring(idx + 3).toInt(), 0, 255);
+        ultimo_brillo = -1;
+        Serial.print("Brillo: ");
+        Serial.println(led_brillo);
+      }
+    }
+
+    if (peticion.indexOf("/MOTOR") > -1) {
+      motor_manual = !motor_manual;
+      Serial.println(motor_manual ? "Motor manual ON" : "Motor manual OFF");
+    }
+
+    if (peticion.indexOf("/ABRIR") > -1 && !puerta_abierta) {
+      Serial.println("Abriendo web!");
+      servo.write(40);
+      puerta_abierta = true;
+      puerta_tiempo_apertura = ahora;
+    }
+
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html");
+    client.println("Connection: close");
+    client.println();
+    client.println(generarHTML(puerta_abierta, ldr, led_encendido, led_auto, led_brillo, temperatura, motor_on, motor_manual));
+    client.stop();
+  }
+
+  delay(50);
+}
